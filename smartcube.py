@@ -5,9 +5,19 @@ from astropy.io import fits
 from astropy.visualization import simple_norm
 from ipywidgets import interact, fixed
 import copy
+import gammapy
 
 theta  = 0 # view angles for simulated image & steady source
 
+def sigma_from_containment_radius(r,alpha):
+    """
+    For a psf defined by dP/domega = (Scale/pi)*exp(-theta²/(2*sigma²)), where domega is the infinitesimal solid angle and theta the offset (hypothesis : theta<<1), compute sigma such as r is the alpha% containment radius
+    """
+    psf=r/(np.sqrt(-2*np.log(1-alpha)))
+    return(psf)
+
+
+###########################################
 def twoD_Gaussian(x,y,amplitude,xo,yo,sigma_x,sigma_y,theta,offset):
     """
     define 2D-Gaussian function and pass independant variables x and y as a list
@@ -21,7 +31,7 @@ def twoD_Gaussian(x,y,amplitude,xo,yo,sigma_x,sigma_y,theta,offset):
     return offset + amplitude*np.exp( - (a*((x-xo)**2) + 2*b*(x-xo)*(y-yo) + c*((y-yo)**2)))
     
 ###########################################
-def CreateSignalModelCube(LC,SourcePeak,xcen,ycen,xwidth,ywidth,nXYsize,sigma_vig,pixsize):
+def CreateSignalModelCube(LC,SourcePeak,xcen,ycen,xwidth,ywidth,nXYsize,pixsize,Acceptance):
 
     # Create x and y indices
     x = np.linspace(0, nXYsize-1, nXYsize)
@@ -29,19 +39,19 @@ def CreateSignalModelCube(LC,SourcePeak,xcen,ycen,xwidth,ywidth,nXYsize,sigma_vi
     x,y = np.meshgrid(x, y)
     
     # Create vignetting to be applied to image and transcient signal
-    vign = twoD_Gaussian(x, y, 1, nXYsize/2,nXYsize/2, sigma_vig/pixsize, sigma_vig/pixsize, 0, 0)
+    vign = Acceptance
     Source = twoD_Gaussian(x, y, 1, xcen, ycen, xwidth, ywidth, theta, 0)
     Source = SourcePeak * (Source/np.sum(Source))
 
     # Create Cube
     SignalModelCube = np.zeros((nXYsize,nXYsize,len(LC)))
     for rank,val in enumerate(LC):
-        SignalModelCube[:,:,rank] = (Source*val)*vign 
+        SignalModelCube[:,:,rank] = (Source*val) #Vignetting ~ Background distribution => No effect on signal
     
     return SignalModelCube
 
 ###########################################
-def CreateBkgModelCube(time,xwidth,ywidth,SteadySourcePeak,bkg,nXYsize,sigma_vig,pixsize):
+def CreateBkgModelCube(time,xwidth,ywidth,SteadySourcePeak,bkg,nXYsize,pixsize,Acceptance):
 
     # Create x and y indices
     x = np.linspace(0, nXYsize-1, nXYsize)
@@ -49,19 +59,19 @@ def CreateBkgModelCube(time,xwidth,ywidth,SteadySourcePeak,bkg,nXYsize,sigma_vig
     x,y = np.meshgrid(x, y)
     
     # Create vignetting to be applied to image and steadysource
-    vign = twoD_Gaussian(x, y, 1, nXYsize/2,nXYsize/2, sigma_vig/pixsize, sigma_vig/pixsize, 0, 0)   
+    vign = Acceptance
     SteadySource = twoD_Gaussian(x, y, 1, 55, 55, xwidth, ywidth, theta, 0)
     SteadySource = SteadySourcePeak * (SteadySource/np.sum(SteadySource))
     
     # Create Cube 
     BkgModelCube = np.zeros((nXYsize,nXYsize,len(time))) 
     for t in range(0,len(time)):
-        BkgModelCube[:,:,t] = (bkg+SteadySource)*vign   
+        BkgModelCube[:,:,t] = bkg*vign+SteadySource #(bkg+SteadySource)*vign#Vignetting ~ Background distribution => No effect on signal  
     
     return BkgModelCube
 
 ###########################################
-def Old_CreateToyCubeImage(LC,SourcePeak,xcen,ycen,xwidth,ywidth,SteadySourcePeak,bkg,nXYsize,sigma_vig,pixsize):
+def Old_CreateToyCubeImage(LC,SourcePeak,xcen,ycen,xwidth,ywidth,SteadySourcePeak,bkg,nXYsize,pixsize):
     """
     Creates the cube (X,Y,T) toy model.
     Parameters
@@ -301,22 +311,24 @@ def ReadCubeFromFile(filename,fich_type):
     return cube.T,header
 
 ############################################
-def SepSourceBkgImage(Image,x_src,y_src,Xsigma,Ysigma,fact):
+def SepSourceBkgImage(Image,x_src,y_src,theta):
     x = np.arange(0,len(Image[:,0]))
     y = np.arange(0,len(Image[0,:]))
     
-    mask_out = np.sqrt((x[np.newaxis,:]-x_src)**2 + (y[:,np.newaxis]-y_src)**2) > fact*np.sqrt(Xsigma**2+Ysigma**2)
-    mask_in = np.sqrt((x[np.newaxis,:]-x_src)**2 + (y[:,np.newaxis]-y_src)**2) <= fact*np.sqrt(Xsigma**2+Ysigma**2)
+    mask_out = np.sqrt((x[np.newaxis,:]-x_src)**2 + (y[:,np.newaxis]-y_src)**2) > theta
+    #VH:np.newaxis creates a new dimension to the array
+    #VH:mask_out is the array of the positions that doesn't respect the condition    
+    mask_in = np.sqrt((x[np.newaxis,:]-x_src)**2 + (y[:,np.newaxis]-y_src)**2) <= theta
     
     Image_Src = copy.deepcopy(Image) ; Image_Bkg = copy.deepcopy(Image)
     
-    Image_Src[mask_out] = float('NaN')
+    Image_Src[mask_out] = float('NaN')#VHReplace the positions that doesn't respect the condition by 'nan'
     Image_Bkg[mask_in] = float('NaN')
         
     return Image_Bkg,Image_Src
 
 ############################################
-def SepSourceBkgCube(Cube,x,y,sigx,sigy,fact):
+def SepSourceBkgCube(Cube,x,y,theta):
     """
     Uses SepSourceBkgImage for each slices of a cube.\
     Returns : cube_bkg,cube_Sbkg
@@ -326,27 +338,27 @@ def SepSourceBkgCube(Cube,x,y,sigx,sigy,fact):
     Cube_Sbkg = copy.deepcopy(Cube)
     
     for k in range(0,timesize):
-        Cube_bkg[:,:,k],Cube_Sbkg[:,:,k] = SepSourceBkgImage(Cube[:,:,k],x,y,sigx,sigy,fact)
+        Cube_bkg[:,:,k],Cube_Sbkg[:,:,k] = SepSourceBkgImage(Cube[:,:,k],x,y,theta)
     
     return Cube_bkg,Cube_Sbkg
 
 ############################################
-def MakeRingCube(Cube,xcen,ycen,Fact_in,Fact_out,SigX,SigY):
+def MakeRingCube(Cube,xcen,ycen,Fact_in,Fact_out,theta):
     
     RingCube = np.zeros(np.shape(Cube))
     for t in range(0,len(Cube[0,0,:])):
-        RingCube[:,:,t] = MakeRingImage(Cube[:,:,t],xcen,ycen,Fact_in,Fact_out,SigX,SigY)
+        RingCube[:,:,t] = MakeRingImage(Cube[:,:,t],xcen,ycen,Fact_in,Fact_out,theta)
     
     return RingCube
 
 ############################################
-def MakeRingImage(Image,xcen,ycen,Fact_in,Fact_out,SigX,SigY):
+def MakeRingImage(Image,xcen,ycen,Fact_in,Fact_out,theta):
     
     x = np.arange(0,len(Image[:,0]))
     y = np.arange(0,len(Image[0,:]))
     
-    mask_in  = np.sqrt((x[np.newaxis,:]-xcen)**2 + (y[:,np.newaxis]-ycen)**2) < Fact_in*np.sqrt(SigX**2+SigY**2)
-    mask_off = np.sqrt((x[np.newaxis,:]-xcen)**2 + (y[:,np.newaxis]-ycen)**2) >= Fact_out*np.sqrt(SigX**2+SigY**2)
+    mask_in  = np.sqrt((x[np.newaxis,:]-xcen)**2 + (y[:,np.newaxis]-ycen)**2) < Fact_in*theta
+    mask_off = np.sqrt((x[np.newaxis,:]-xcen)**2 + (y[:,np.newaxis]-ycen)**2) >= Fact_out*theta
     
     ImageRing = copy.deepcopy(Image)
     ImageRing[mask_in] = float('NaN') ; ImageRing[mask_off] = float('NaN')
